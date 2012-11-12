@@ -1,0 +1,125 @@
+#!/bin/sh
+if [ -z "$1" ];then
+    printf "Usage:\n $0 DUMP_LABEL\n"
+    exit 0
+fi
+
+CDATE="$1"
+
+TMPDIR="/opt/tftpboot/FBSD70.amd64"
+MOUNTPOINT="/mnt/dumpedit"
+DUMPDIR="${TMPDIR}/dumps/${CDATE}"
+
+[ -d ${MOUNTPOINT} ] || mkdir -p ${MOUNTPOINT}
+[ -d ${TMPDIR} ] || mkdir -p ${TMPDIR}
+
+if [ ! -d ${DUMPDIR} ];then
+    printf "directory ${DUMPDIR} does not exists\n"
+    exit 1
+fi
+
+if [ "${CDATE}" != "common" ]; then
+    DUMPFILES="`find ${DUMPDIR}/../common ${DUMPDIR} -type f`"
+else
+    DUMPFILES="`find ${DUMPDIR} -type f`"
+fi
+
+
+
+DUMPSIZE=`du -k -c ${DUMPFILES} | grep 'total$' | awk '{print $1}'`
+if [ `/bin/df -k ${TMPDIR} | awk '{print $4}' | tail -1` -lt $((${DUMPSIZE}+(1024*1024) )) ];then
+    /usr/bin/printf "Not enough size in ${TMPDIR}\nexiting...\n"
+    exit 1
+fi
+
+DUMPS=""
+for file in ${DUMPFILES}; do
+    f="`basename ${file}`"
+    f=${f%%.dump}
+    DUMPS="$f ${DUMPS}"
+done
+
+DUMPS="`for d in ${DUMPS};do echo "\$d";done | sort -u`"
+
+dotmaker (){
+    while [ "`ps ${JID} | tail +2`" != ""  ] ;do
+        printf '.'
+        sleep 1
+    done
+}
+
+cmdwrapper (){
+    err=0
+    eval $cmd >/dev/null 2>&1 || err=1
+    if [ $err -eq 1 ]; then
+        printf "$cmd : error\n"
+        exit 1
+    fi
+}
+
+md_mount(){
+    if [ -f ${DUMPDIR}/${part}.dump ]; then
+        mdsize="`stat -f %z ${DUMPDIR}/${part}.dump`"
+    else
+        mdsize="`stat -f %z ${DUMPDIR}/../common/${part}.dump`"
+    fi
+    mdsize=$((${mdsize}/1024/1024+100))
+    /usr/bin/printf "Marking up and mounting ${part}\n"
+    if [ "${part}" = "root" ]; then
+        cmd="mdmfs -s ${mdsize}m md ${MOUNTPOINT}";cmdwrapper
+    else
+        [ -d ${MOUNTPOINT}/${part} ] || mkdir -p ${MOUNTPOINT}/${part}
+        cmd="mdmfs -s ${mdsize}m md ${MOUNTPOINT}/${part}";cmdwrapper
+    fi
+
+}
+
+md_restore(){
+    /usr/bin/printf "Restoring $part\n"
+    if [ "${part}" = "root" ]; then
+        cmd="cd ${MOUNTPOINT}"; cmdwrapper
+    else
+        cmd="cd ${MOUNTPOINT}/${part}"; cmdwrapper
+    fi
+    if [ -f ${DUMPDIR}/${part}.dump ]; then
+        restore -r -f ${DUMPDIR}/${part}.dump > /dev/null 2>&1 & JID=$!
+        dotmaker; printf "\n"
+        echo "${DUMPDIR}/${part}.dump" > orig.path
+    else
+        restore -r -f ${DUMPDIR}/../common/${part}.dump > /dev/null 2>&1 & JID=$!
+        dotmaker; printf "\n"
+        echo "${DUMPDIR}/../common/${part}.dump" > orig.path
+    fi
+
+    if [ "${part}" = "root" ]; then
+        if [ ! -f ${MOUNTPOINT}/dump.mark ] || [ "`cat ${MOUNTPOINT}/dump.mark`" != "${CDATE}" ]; then
+            echo "${CDATE}" > ${MOUNTPOINT}/dump.mark
+        fi
+    else
+        if [ ! -f ${MOUNTPOINT}/${part}/dump.mark ] || [ "`cat ${MOUNTPOINT}/${part}/dump.mark`" != "${CDATE}" ]; then
+            echo "${CDATE}" > ${MOUNTPOINT}/${part}/dump.mark
+        fi
+    fi
+}
+
+md_remount (){
+    if [ ! -f ${DUMPDIR}/${part}.dump ]; then
+        if [ "${part}" = "root" ]; then
+            mount -o rw -u ${MOUNTPOINT}/
+        else
+            mount -o rw -u ${MOUNTPOINT}/${part}
+        fi
+    fi
+}
+
+part="root"; md_mount; md_restore; md_remount
+
+for part in ${DUMPS}; do
+    if [ "${part}" != "root" ]; then
+        md_mount
+        md_restore
+        md_remount
+    fi
+done
+
+printf "Dumps are mounted at ${MOUNTPOINT}\n"

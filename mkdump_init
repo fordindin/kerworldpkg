@@ -1,0 +1,277 @@
+#!/bin/sh
+
+# $$
+
+MDROOT=40
+#MDVAR=41
+MDOBJ=42
+PSIZE=2
+TMPDIR="/mnt/yaj13pgx/dindin/"
+SYSTEM_MD_SIZE="400m"
+OBJ_MD_SIZE="3036m"
+
+YACONF="$SRCDIR/yaconf"
+
+trap cleanup 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15
+
+if [ "$1" = "-h" -o "$1" = "--help" ]; then
+    echo 'Usage: mkdump_init [-s <SRCDIR>] [-a <TAGET_ARCH] | [ -c ]'
+    exit 2
+fi
+
+CLEANUP=""
+
+args=`getopt s:a: $*`
+set -- $args
+for i; do
+    case "$i"
+    in
+        -s) SRCDIR="${2%/}";SRCDIR="${SRCDIR%/src}";
+            shift; shift;;
+        -a) ARCH="$2";
+            shift; shift;;
+        --) shift; break;;
+    esac
+done
+
+selfname=$(basename $0)
+shpid=$$
+job="`sh -c 'ps ax | grep '${selfname}' | grep -v grep | grep -v $$ | grep -v '$shpid`";
+if [ -n "$job" ]; then
+    echo "Seems another $0 is running"
+    echo "Wait till it finish job"
+    exit 1
+fi
+
+{
+umount -f ${TMPDIR}/mnt/var
+umount -f ${TMPDIR}/mnt
+umount -f ${TMPDIR}/obj/
+mdconfig -d -u ${MDROOT}
+#mdconfig -d -u ${MDVAR}
+mdconfig -d -u ${MDOBJ}
+} >/dev/null 2>&1
+
+[ -z "$SRCDIR" ] && SRCDIR="/usr/src"
+if ! stat $SRCDIR > /dev/null 2>&1; then
+    printf "\n\t$SRCDIR: non-existent path\n\n"
+    exit 1
+elif ! stat $SRCDIR/UPDATING > /dev/null 2>&1; then
+    printf "\n\t$SRCDIR: FreeBSD sources not found\n\n"
+    exit 1
+fi
+
+[ -d ${TMPDIR} ] || mkdir -p ${TMPDIR}
+MD_DIR="${TMPDIR}/md"
+[ -d ${MD_DIR} ] || mkdir -p ${MD_DIR}
+PSIZE=1
+ROOTSIZE=${PSIZE}
+VARSIZE=${PSIZE}
+export LANG="C"
+CDATE="`date +%Y-%h-%d-%H%M`"
+TOTSIZE=$((${ROOTSIZE}+${VARSIZE}))
+[ -z "$ARCH" ] && ARCH=$(uname -p)
+case $ARCH in
+    amd64) break;;
+    ia64) break;;
+    i386) break;;
+    arm) break;;
+    sparc64) break;;
+    powerpc) break;;
+    sun4v) break;;
+    *) printf "\n\t$ARCH: unknown architecture;\n\tvalid archs are:
+    \t\tamd64
+    \t\tia64
+    \t\ti386
+    \t\tarm
+    \t\tsparc64
+    \t\tpowerpc
+    \t\tsun4v\n\n";
+       exit 1;
+       break;;
+esac
+
+get_release (){
+    REVISION=$(cat ${SRCDIR}/sys/conf/newvers.sh | grep '^REVISION=' | awk -F= '{print $2}' | tr -d '"' )
+    BRANCH=$(cat ${SRCDIR}/sys/conf/newvers.sh | grep '^BRANCH=' | awk -F= '{print $2}' | tr -d '"' )
+    printf "${REVISION}-${BRANCH}"
+}
+
+RELEASE="`get_release`"
+
+ticker (){
+        chars="/ - \ |"
+        n=1
+        printf '/'
+        while [ "`ps ${JID} | tail +2`" != ""  ] ;do
+            char=$(echo ${chars} | awk "{print \$$n}")
+            printf '\b%s' $char
+            sleep 1
+            n=$((${n}+1))
+            [ ${n} -eq 5 ] && n=1
+        done
+        printf '\b\n\n'
+
+}
+
+ticker2 (){
+        export LANG="C"
+        str=`date +%H:%M:%S`
+        strlen=`printf "$str" | wc -m`
+        printf $str
+        sleep 3
+        while [ "`ps ${JID} | tail +2`" != ""  ] ;do
+            for i in `jot $strlen`; do
+                printf '\b'
+            done
+            str=`date +%H:%M:%S`
+            strlen=`printf "$str" | wc -m`
+            printf "$str"
+            sleep 3
+        done
+}
+
+cmdwrapper (){
+    err=0
+    eval $cmd >/dev/null 2>&1 || err=1
+    if [ $err -eq 1 ]; then
+        printf "$cmd : error\n"
+        exit 1
+    fi
+}
+
+
+err_break(){
+    if [ -z "$1" ]; then
+        dir="${tmpdir}"
+    else
+        dir="$1"
+    fi 
+    printf "Exiting due error. (%s)\n" "$dir"
+    cleanup "soft" >/dev/null 2>&1
+}
+
+
+cleanup (){
+    kill ${JID}
+    /usr/bin/printf "Removing memory disks\n"
+    cmd="umount -f ${TMPDIR}/mnt/var"; cmdwrapper
+    cmd="umount -f ${TMPDIR}/mnt"; cmdwrapper
+    cmd="umount -f ${TMPDIR}/obj/"; cmdwrapper
+
+    for md in $MDROOT ${MDOBJ};do
+        cmd="mdconfig -d -u $md"; cmdwrapper
+    done
+    JIDS="$JIDS $(ps ax | grep ${TMPDIR} | grep -v grep | awk '{print $1}')"
+    child=$(ps ax | grep "buildworld" | grep -v grep | awk '{print $1}')
+    JIDS="$JIDS $child"
+    kill $JIDS
+    kill $$
+    rm ${YACONF}
+    {
+    mdconfig -d -u ${MDROOT}
+#    mdconfig -d -u ${MDVAR}
+    mdconfig -d -u ${MDOBJ}
+    } >/dev/null 2>&1
+    exit 1
+
+#cmd="rm -f ${MD_DIR}/var.md ${MD_DIR}/root.md"; cmdwrapper
+} 
+
+SVN_REVISON=$(cd ${SRCDIR}; svn info 2> /dev/null| awk -F': ' '/Revision/ {print $2}')
+GIT_BRANCH=$(cd ${SRCDIR}; git branch 2> /dev/null| awk '/\* / {print $2}')
+GIT_TAG=$(cd ${SRCDIR}; git tag 2> /dev/null)
+GIT_COMMIT=$(cd ${SRCDIR}; git log 2> /dev/null | head -1)
+
+[ ! -d ${TMPDIR}/mnt ] && mkdir ${TMPDIR}/mnt
+mdmfs -M -S -o async -s ${SYSTEM_MD_SIZE} md${MDROOT} ${TMPDIR}/mnt
+mkdir -p ${TMPDIR}/mnt/obj
+mdmfs -M -S -o async -s ${OBJ_MD_SIZE} md${MDOBJ} ${TMPDIR}/obj/
+[ ! -d ${TMPDIR}/dumps ] && mkdir ${TMPDIR}/dumps
+DUMPDIR=${TMPDIR}/dumps/${CDATE}-${ARCH}-${RELEASE}
+[ ! -d ${DUMPDIR} ] && mkdir ${DUMPDIR}
+/usr/bin/printf "Dumps will be stored at ${DUMPDIR}\n"
+
+export MAKEOBJDIRPREFIX=${TMPDIR}/obj/
+if [ -z "${NTHREADS}" ]; then
+    ncpu="$(sysctl -n hw.ncpu)"
+fi
+tmp_relinfo=${TMPDIR}/relinfo
+touch ${YACONF}
+truncate -s0 ${YACONF}
+cat ${YACONF} | grep -v '^"[A-Z]*:' > ${tmp_relinfo}
+SYSTAG="$(grep '#define __FreeBSD_version' ${SRCDIR}/sys/sys/param.h  | awk '{print $3}')"
+relinfo="\"RELEASE: ${RELEASE}\"
+\"ARCH: ${ARCH}\"
+\"CDATE: ${CDATE}\"
+\"VERSION: ${SYSTAG}\"
+\"BUILDHOST: `hostname -s`\"
+\"SRCDIR: ${SRCDIR}\"
+\"FREEBSD_SVN_REVISON: ${SVN_REVISON}\"
+\"GIT_BRANCH: ${GIT_BRANCH}\"
+\"GIT_TAG: ${GIT_TAG}\"
+\"GIT_COMMIT: ${GIT_COMMIT}\"
+
+"
+printf "${relinfo}" >> ${tmp_relinfo}
+
+printf "${relinfo}"
+#cat ${tmp_relinfo}
+printf "World building info:\n"> ${TMPDIR}/motd
+cat ${tmp_relinfo} | tr -d '"' >> ${TMPDIR}/motd
+cat ${tmp_relinfo} >> ${YACONF}
+printf "To see kernel building info try to run:\n\n\tconfig -x /boot/kernel/kernel | tr -d \'\\\\0\' | grep '^#'\n\n-- \n" >> ${TMPDIR}/motd
+/usr/bin/printf "building world\n"
+/usr/bin/printf "Started at:\n`date +%H:%M:%S`\nNow:\n"
+time_b_out="${TMPDIR}/time_build"
+build_out="${TMPDIR}/make_buildworld_output"
+time -h -o ${time_b_out} make -C ${SRCDIR} -j $((${ncpu}*4)) ${MAKEARGS} buildworld TARGET_ARCH=${ARCH}  > ${build_out} 2>&1 || err_break "$build_out"  & JID=$!
+ticker2; printf "\n"
+printf "\nworld build time: %s\n" "$(tail -1 ${TMPDIR}/time_build | awk '{print $1}')"
+
+
+/usr/bin/printf "Installing world\n"
+
+time_i_out="${TMPDIR}/time_install"
+build_out="${TMPDIR}/installworld_output"
+time -h -o ${time_i_out} make -C ${SRCDIR} ${MAKEARGS} installworld DESTDIR=${TMPDIR}/mnt/ TARGET_ARCH=${ARCH} > ${build_out} || err_break "$build_out" 2>&1 & JID=$!
+ticker; printf "\n"
+
+
+printf "\nworld install time: %s\n" "$(tail -1 ${TMPDIR}/time_install | awk '{print $1}')"
+
+/usr/bin/printf "Installing configuration files\n"
+#export CC=/usr/local/bin/gcc43
+configfiles_output="${TMPDIR}/configfiles_output"
+#cmd="mergemaster -i -m${SRCDIR} -A${ARCH} -D${TMPDIR}/mnt/ -t${TMPDIR}/temproot"
+#cmd="mergemaster -a -i -A${ARCH} -m${SRCDIR} -D${TMPDIR}/mnt/ -t${TMPDIR}/temproot"
+#cmd="mergemaster -a -i ${TMPDIR}/mnt/"
+touch ${configfiles_output}
+truncate -s0 ${configfiles_output}
+cmd="make -C ${SRCDIR}/etc ${MAKEARGS} DESTDIR=${TMPDIR}/mnt/ TARGET_ARCH=${ARCH}"
+echo "${cmd}" > ${configfiles_output}
+${cmd} >> ${configfiles_output} 2>&1 || err_break "${configfiles_output}" & JID=$!
+ticker; printf "\n"
+cmd="make -C ${SRCDIR}/etc ${MAKEARGS} distribution DESTDIR=${TMPDIR}/mnt/ TARGET_ARCH=${ARCH}"
+echo "${cmd}" >> ${configfiles_output}
+${cmd} >> ${configfiles_output} 2>&1 || err_break "${configfiles_output}" & JID=$!
+ticker; printf "\n"
+
+install ${TMPDIR}/motd ${TMPDIR}/mnt/etc/motd
+/usr/bin/printf "Marking dump\n"
+echo "$CDATE" > ${TMPDIR}/mnt/dump.mark
+#echo "$CDATE" > ${TMPDIR}/mnt/var/dump.mark
+
+ROOTDUMP="${DUMPDIR}/root.dump"
+#VARDUMP="${DUMPDIR}/var.dump"
+/usr/bin/printf "Making dumps:\n"
+/usr/bin/printf "${ROOTDUMP}\n"
+/sbin/dump -a -0u -L -f ${ROOTDUMP} /dev/md${MDROOT}  > /dev/null 2>&1 & JID=$!
+ticker; printf "\n"
+#/usr/bin/printf "${VARDUMP}\n"
+#/sbin/dump -a -0u -L -f ${VARDUMP} /dev/md${MDVAR} > /dev/null 2>&1 & JID=$!
+#ticker; printf "\n"
+
+
+cleanup > /dev/null 2>&1
+/usr/bin/printf "Dumps are stored at ${DUMPDIR}\n"

@@ -1,0 +1,268 @@
+#!/bin/sh
+
+
+trap cleanup 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15
+
+# $Id: mk_pkg 482313 2009-12-10 17:11:32Z dindin $
+
+#if [ "$1" = "-h" ]; then
+#    echo 'Usage: mk_pkg [-s <SRCDIR>] [-a <TAGET_ARCH] '
+#    exit 2
+#fi
+
+WAIT=0;
+
+usage (){
+    printf "Usage:\n  $(basename $0) [-h] [-w <waittime>] [-s <SRCDIR>] [-a <ARCH>] [-r <RELEASE>] [-t <NUMTHREADS>] [<KERNCONF>]\n\n"
+    printf " -h\t\t this message\n"
+    printf " -w WAITTIME\t wait between hard disk writing operations\n"
+    printf " -s SRCDIR\t system sources dir\n"
+    printf " -a ARCH\t target architecture (amd64, i386 etc)\n"
+    printf " -r RELEASE\t FreeBSD release\n"
+    printf " -t NUMTHREADS\t number of concurrent build threadsn"
+    printf " KERNCONF\t kernel config\n\n"
+    exit
+
+}
+
+args=`getopt hw:s:a:r:t: $*`
+set -- $args
+for i; do
+    case "$i"
+    in
+        -h) usage; exit 0; ;; 
+        -w) WAIT="$2";
+            shift; shift;;
+        -s) SRCDIR="$2";
+            shift; shift;;
+        -a) ARCH="$2";
+            shift; shift;;
+        -t) ntr="$2";
+            shift; shift;;
+        -r) RELEASE="$2";
+            shift; shift;;
+        --) KERNCONF=$2; 
+            shift; break;;
+    esac
+done
+
+WDIR=$(realpath $0)
+WDIR=$(dirname ${WDIR})
+SELFNAME=$(basename $0)
+cd $WDIR
+if [ ! -f ${WDIR}/pre_mk.sh ]; then
+    echo "Can't find file ${WDIR}/pre_mk.sh"
+    echo "I need it!!"
+    echo "exit"
+    exit 1
+elif [ ! -f ${WDIR}/post_mk.sh ]; then
+    echo "Can't find file ${WDIR}/post_mk.sh"
+    echo "I need it!!"
+    echo "exit"
+    exit 1
+fi
+
+export LANG="C"
+CDATE="`date +%Y-%h-%d-%H%M`"
+
+[ -z "$SRCDIR" ] && SRCDIR="/place/GIT-repos/FreeBSD-7-r199991"
+SRCDIR="${SRCDIR}"
+if ! stat $SRCDIR > /dev/null 2>&1; then
+    printf "\n\t$SRCDIR: non-existent path\n\n"
+    exit 1
+elif ! stat $SRCDIR/UPDATING > /dev/null 2>&1; then
+    printf "\n\t$SRCDIR: FreeBSD sources not found\n\n"
+    exit 1
+fi
+
+SVN_REVISON=$(cd ${SRCDIR}; svn info | awk -F': ' '/Revision/ {print $2}')
+GIT_BRANCH=$(cd ${SRCDIR}; git branch | awk '/\* / {print $2}')
+GIT_TAG=$(cd ${SRCDIR}; git tag)
+GIT_COMMIT=$(cd ${SRCDIR}; git log | head -1)
+
+export TMPDIR=/opt/tmp
+YACONF="$SRCDIR/yaconf"
+SYSTAG="$(grep '#define __FreeBSD_version' ${SRCDIR}/sys/sys/param.h  | awk '{print $3}')"
+
+JIDS=""
+
+ticker (){
+        chars="/ - \ |"
+        n=1
+        printf '/'
+        while [ "`ps ${JID} | tail +2`" != ""  ] ;do
+            char=$(echo ${chars} | awk "{print \$$n}")
+            printf '\b%s' $char
+            sleep 1
+            n=$((${n}+1))
+            [ ${n} -eq 5 ] && n=1
+        done
+        printf '\b\n\n'
+
+}
+
+cleanup (){
+    trap : 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15
+    printf "Cleanup...\n"
+    memd1="$(mount | grep "${mnt_objdir} " | awk '{print $1}')"
+    memd1=${memd1#/dev/md}
+    memd2="$(mount | grep "${tmp_mount} " | awk '{print $1}')"
+    memd2=${memd2#/dev/md}
+
+    JIDS="$JIDS $(ps ax | grep ${tmpdir} | grep -v grep | awk '{print $1}')"
+    child=$(ps ax | grep "ARCH=${ARCH} TARGET_ARCH=${ARCH}" | grep -v grep | awk '{print $1}')
+    JIDS="$JIDS $child"
+    kill -9 ${JIDS}
+    kill -9 ${JID}
+    umount -f ${mnt_objdir} > /dev/null 2>&1
+    umount -f ${tmp_mount} > /dev/null 2>&1
+
+    mdconfig -d -u ${memd1} > /dev/null 2>&1
+    mdconfig -d -u ${memd2} > /dev/null 2>&1
+    cd /
+    if [ "$1" != "soft" ]; then
+        /bin/rm -Rf ${tmpdir}
+    fi
+    kill -9 $$
+    rm -Rf ${YACONF}
+    exit
+}
+
+
+err_break(){
+    if [ -z "$1" ]; then
+        dir="${tmpdir}"
+    else
+        dir="$1"
+    fi 
+    printf "Exiting due error. (%s)\n" "$dir"
+    cleanup "soft"
+}
+
+get_release (){
+    REVISION=$(cat ${SRCDIR}/sys/conf/newvers.sh | grep '^REVISION=' | awk -F= '{print $2}' | tr -d '"' )
+    BRANCH=$(cat ${SRCDIR}/sys/conf/newvers.sh | grep '^BRANCH=' | awk -F= '{print $2}' | tr -d '"' )
+    printf "${REVISION}-${BRANCH}"
+}
+
+if [ -z "${KERNCONF}" ]; then
+    KERNCONF="PRODUCTION"
+fi
+if [ -z "${RELEASE}" ]; then
+    RELEASE=`get_release`
+fi
+if [ -z "${ARCH}" ]; then
+    ARCH="$(uname -p)"
+fi
+#printf "RELEASE=%s\nARCH=%s\nKERNCONF=%s\n"  ${RELEASE} ${ARCH} ${KERNCONF}
+
+tmpdir=$(mktemp -t $SELFNAME -d)
+mnt_objdir="${tmpdir}/obj"
+mnt_objdir="$(realpath ${mnt_objdir})"
+mkdir -p ${mnt_objdir}
+DEST=/opt/kern_pkg
+[ -d ${DEST} ] || mkdir -p ${DEST}
+
+DATE=`date +%d-%m-%y--%H:%M.%S`
+
+packname=${DEST}/${RELEASE}-${ARCH}-${KERNCONF}--${DATE}.sh
+
+
+#mountdir="/usr/obj"
+
+#echo ${mnt_objdir}
+#exit
+
+mdmfs -s 1200m md ${mnt_objdir} || err_break "${mnt_objdir}"
+tmp_mount="${tmpdir}/mountpoint"
+tmp_mount="$(realpath ${tmp_mount})"
+mkdir -p ${tmp_mount}
+
+tmp_relinfo=${tmpdir}/relinfo
+touch ${YACONF}
+truncate -s0 ${YACONF}
+cat ${YACONF} | grep -v '^"[A-Z]*:' > ${tmp_relinfo}
+printf "\"RELEASE: ${RELEASE}\"\n\"ARCH: ${ARCH}\"\n\"CDATE: ${CDATE}\"\n\"VERSION: ${SYSTAG}\"\n\"BUILDHOST: `hostname -s`\"\n\"SRCDIR: ${SRCDIR}\"\n\"FREEBSD_SVN_REVISON: ${SVN_REVISON}\"\n\"GIT_BRANCH: ${GIT_BRANCH}\"\n\"GIT_TAG: ${GIT_TAG}\"\n\"GIT_COMMIT: ${GIT_COMMIT}\"\n\n\n" >> ${tmp_relinfo}
+cat ${tmp_relinfo} | tr -d '"'
+mv ${tmp_relinfo} ${YACONF}
+mdmfs -s 800m md ${tmp_mount} || err_break "${tmp_mount}"
+
+cd ${SRCDIR} ;sleep 1
+MAKEOBJDIRPREFIX=${mnt_objdir}
+export MAKEOBJDIRPREFIX
+echo "Object dir: ${MAKEOBJDIRPREFIX}"
+ncpu="$(sysctl -n hw.ncpu)"
+echo "none none none" > ${tmpdir}/time_build make
+
+
+[ -z "$ntr" ] && ntr=$((${ncpu}*4))
+
+MAKEARGS="-j $ntr KERNCONF=${KERNCONF} ARCH=${ARCH} TARGET_ARCH=${ARCH}"
+if [ -n "${KERNCONFDIR}" ]; then
+    MAKEARGS="${MAKEARGS} KERNCONFDIR=${KERNCONFDIR}"
+fi
+
+if [ "$ARCH" != "$(uname -p)" ]; then
+    printf "\nbuilding toolchain \t"
+    time -h -o ${tmpdir}/time_toolchain make ${MAKEARGS} kernel-toolchain  > ${tmpdir}/make_buildkernel_output || err_break "${tmpdir}/make_toolchain_output" & JID=$! ;export JID; 
+    JIDS="${JIDS} ${JID}"
+    ticker
+    printf "\nkernel-toolchain build time: %s\n" "$(tail -1 ${tmpdir}/time_toolchain | awk '{print $3}')"
+    sleep ${WAIT}
+fi
+
+
+printf "\nbuilding kernel \t"
+time -h -o ${tmpdir}/time_build make ${MAKEARGS} buildkernel > ${tmpdir}/make_buildkernel_output || err_break "${tmpdir}/make_buildkernel_output" & JID=$! ;export JID; 
+JIDS="${JIDS} ${JID}"
+ticker
+printf "\nkernel build time: %s\n" "$(tail -1 ${tmpdir}/time_build | awk '{print $3}')"
+sleep ${WAIT}
+printf "\ninstalling kernel \t"
+MAKEARGS="${MAKEARGS} DESTDIR=${tmpdir}/mountpoint"
+time -h -o ${tmpdir}/time_install make ${MAKEARGS} installkernel > ${tmpdir}/make_installkernel_output || err_break "${tmpdir}/make_installkernel_output" & JID=$! ; export JID; 
+JIDS="${JIDS} ${JID}"
+ticker
+printf "\nkernel build time: %s\n" "$(tail -1 ${tmpdir}/time_build | awk '{print $3}')"
+printf "\nkernel install time: %s\n" "$(tail -1 ${tmpdir}/time_install | awk '{print $3}')"
+sleep ${WAIT}
+printf "\nCreating package\t"
+
+
+( 
+    cd ${tmpdir}/mountpoint
+    /usr/bin/tar cfz ${tmpdir}/kern.tgz ./
+    /bin/cat ${WDIR}/pre_mk.sh | sed -e "s_%%ARCH%%_${ARCH}_g" \
+    -e "s_%%RELEASE%%_${RELEASE}_g"  >> ${packname}
+    /bin/cat ${tmpdir}/kern.tgz | /usr/bin/uuencode kern.tgz >> ${packname}
+    /usr/bin/printf "EOFEOFEOF\n" >> ${packname}
+    /bin/cat ${WDIR}/post_mk.sh  >> ${packname} 
+
+)  & JID=$! ; 
+JIDS="${JIDS} ${JID}"
+ticker
+
+
+printf "Package created\nstored as:\n%s\n" ${packname}
+sleep ${WAIT}
+
+
+/bin/chmod +x ${packname}
+md5=$(cat ${packname} | md5)
+echo ${md5} >> ${packname}
+sleep ${WAIT}
+
+
+memd1="$(mount | grep "${mnt_objdir} " | awk '{print $1}')"
+memd1=${memd1#/dev/md}
+memd2="$(mount | grep "${tmp_mount} " | awk '{print $1}')"
+memd2=${memd2#/dev/md}
+
+cd /
+umount -f ${mnt_objdir}
+umount -f ${tmp_mount}
+
+mdconfig -d -u ${memd1}
+mdconfig -d -u ${memd2}
+/bin/rm -Rf ${tmpdir}
+

@@ -1,0 +1,102 @@
+#!/bin/sh
+
+TMPDIR="/opt/tftpboot/FBSD70.amd64"
+MD_DIR="${TMPDIR}/tmp/md"
+DUMPDIR="${TMPDIR}/dumps/${CDATE}"
+MOUNTPOINT="/mnt/dumpedit"
+CDATE="`cat /mnt/dumpedit/dump.mark 2> /dev/null`"
+
+[ -d ${MD_DIR} ] || mkdir -p ${MD_DIR}
+[ -d ${TMPDIR} ] || mkdir -p ${TMPDIR}
+[ -d ${DUMPDIR} ] || mkdir  ${DUMPDIR}
+[ -d ${MOUNTPOINT} ] || mkdir -p ${MOUNTPOINT}
+
+dotmaker (){
+    while [ "`ps ${JID} | tail +2`" != ""  ] ;do
+        printf '.'
+        sleep 1
+    done
+}
+
+cmdwrapper (){
+    err=0
+    eval $cmd >/dev/null 2>&1 || err=1
+    if [ $err -eq 1 ]; then
+        printf "$cmd : error\n"
+        exit 1
+    fi
+}
+
+if [ -z "${CDATE}" ]; then
+    printf "Unknown dump\npossible no dumps open?\ntry to oprn dump using mkdump_open\nexiting...\n"
+    exit 0
+fi
+
+DUMP_MP="`mount | grep  ${MOUNTPOINT} | awk '{print $3}'`"
+DUMPS=""
+
+for mp in ${DUMP_MP};do
+    mp_t=${mp##${MOUNTPOINT}}
+    mp_t=${mp_t##/}
+    DUMPS="${mp_t} ${DUMPS}"
+done
+#mark() {
+#    for mp in ${DUMP_MP}; do
+#        echo "${CDATE}" > ${mp}/dump.mark
+#    done
+#}
+
+mk_dump (){
+    /usr/bin/printf "Making dump for ${part}\n"
+    if [ "${part}" = "root" ]; then
+        MDN="`mount | grep "${MOUNTPOINT} " | awk '{print $1}'`"
+        OPATH="`cat ${MOUNTPOINT}/orig.path`"
+        mount -o rw -u ${MOUNTPOINT}/
+        rm ${MOUNTPOINT}/orig.path
+        rm ${MOUNTPOINT}/dump.mark
+
+    else
+        MDN="`mount | grep "${MOUNTPOINT}/${part} " | awk '{print $1}'`"
+        OPATH="`cat ${MOUNTPOINT}/${part}/orig.path`"
+        mount -o rw -u ${MOUNTPOINT}/${part}
+        rm ${MOUNTPOINT}/${part}/orig.path
+        rm ${MOUNTPOINT}/${part}/dump.mark
+    fi
+    /sbin/dump -a -0u -L -f ${OPATH} ${MDN} > /dev/null 2>&1 & JID=$!
+    dotmaker; printf "\n"
+}
+
+mk_cleanup(){
+    /usr/bin/printf "Removing memory disks\n"
+    cmd="cd"; cmdwrapper
+    for dump in ${DUMPS}; do
+        cmd="umount -f ${MOUNTPOINT}/${dump}"; cmdwrapper
+    done
+    cmd="umount -f ${MOUNTPOINT}"; cmdwrapper
+    for md in ${MDS};do
+        cmd="mdconfig -d -u $md"; cmdwrapper
+    done
+    #cmd="rm -f ${MD_DIR}/root.md"; cmdwrapper
+    #for dump in ${DUMPS}; do
+    #    cmd="rm ${MD_DIR}/${dump}.md"; cmdwrapper
+    #done
+    rm -Rf ${MD_DIR}/../tmp
+}
+
+MDISKS="`df | grep "${MOUNTPOINT}" | awk '{print $1}'`"
+MDS=""
+for d in ${MDISKS}; do
+    MDS="${d##/dev/md} ${MDS}"
+done
+
+
+#mark
+
+part="root"; mk_dump
+for part in ${DUMPS};do
+    mk_dump
+done
+
+mk_cleanup
+
+/usr/bin/printf "Dumps are stored at\n${DUMPDIR}\n"
