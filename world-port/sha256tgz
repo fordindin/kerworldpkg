@@ -1,0 +1,31 @@
+#!/bin/sh -eu
+
+tarpath="$1"
+PATH="/usr/bin:/usr/sbin:${PATH}"
+
+SIFS="${IFS}"
+tarfile=$(cat $tarpath)
+
+IFS="
+"
+echo "${tarfile}" | tar tv -f -
+exit 0
+TARCONTENT=$(echo "${tarfile}" | tar tv -f /dev/stdin | awk '{print $9" "$1" "$2" "$3" "$4" "$5}' | sort -k 1)
+printf "${TARCONTENT}"
+
+for f in `echo "${TARCONTENT}" \
+		| grep -v '[^[:space:]]*/ ' | sort`; do
+		fname=$(echo $f | cut -d ' ' -f1)
+		tar -O -q -x --include "$fname" -f ${tarpath} | sha256;
+		echo $f | cut -d ' ' -f2 | sha256
+done
+exit 0
+IFS="${SIFS}"
+
+exit 1
+
+DIRHASH=$(cd $dir_path && find . -type d | sort | xargs -L1 xargs -L1 stat -f %g%u%T%p | sha256)
+
+RESULTHASH=$(echo ${DIRHASH}${FILEHASH} | sha256)
+
+printf "SHA256DIR (${1%%/}/) = ${RESULTHASH}\n"
